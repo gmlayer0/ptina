@@ -56,6 +56,8 @@ class LinearBVH:
         self.id = ti.field(int, n)
 
         self.n = ti.field(int, ())
+        self.parent = ti.field(int, n)
+        self.miss_ptr = ti.field(int, n)
 
 
     @ti.func
@@ -228,8 +230,34 @@ class LinearBVH:
                 rhs += n
 
             self.child[i][0] = lhs
+            if lhs >= n:
+                self.parent[lhs - n] = i
             self.child[i][1] = rhs
+            if rhs >= n:
+                self.parent[rhs - n] = i
 
+    def genRope(self):
+        stack = []
+        stack.append(0)
+        n = self.n[None]
+        while len(stack) != 0:
+            curr = stack.pop()
+            rhs = self.child[curr][1]
+            if rhs >= n:
+                stack.append(rhs - n)
+            lhs = self.child[curr][0]
+            if lhs >= n:
+                stack.append(lhs - n)
+
+            parent = self.parent[curr]
+            if parent == -1:
+                parent_rhs = -1
+            else:
+                parent_rhs = self.child[parent][1]
+            if parent_rhs != curr + n and (parent_rhs >= n or parent_rhs == -1):
+                self.miss_ptr[curr] = parent_rhs
+            else:
+                self.miss_ptr[curr] = self.miss_ptr[parent]
 
     @ti.func
     def getNodeBoundingBox(self, n, i):
@@ -301,7 +329,9 @@ class LinearBVH:
         self.sortMortonCodes()
         print('[TinaBVH] generating hierarchy...')
         self.genHierarchy()
+        self.parent[0] = -1
         self.genAABBs()
+        self.genRope()
         print('[TinaBVH] building LBVH tree done')
 
 
@@ -313,19 +343,21 @@ class LinearBVH:
     @ti.func
     def intersect(self, ray, avoid):
         n = self.n[None]
-
-        stack = Stack().get()
-        stack.clear()
-        stack.push(n)
-
+        next_ptr = n
         ret = namespace(hit=0, depth=inf, index=-1, uv=V(0., 0.))
 
-        ntimes = 0
-        while ntimes < n and stack.size() != 0:
-            curr = stack.pop()
+        while next_ptr != -1:
+            curr = next_ptr
+            i = curr - n
+            bbox = Box(self.bmin[i], self.bmax[i])
+            if bbox.intersect(ray).hit == 0:
+                next_ptr = self.miss_ptr[i]
+                continue
 
-            if curr < n:
-                index = self.leaf[curr]
+            rhs = self.child[i][1]
+            lhs = self.child[i][0]
+            if rhs < n:
+                index = self.leaf[rhs]
                 if index != avoid:
                     hit = self.element_intersect(index, ray)
                     if hit.hit != 0 and hit.depth < ret.depth:
@@ -333,16 +365,22 @@ class LinearBVH:
                         ret.index = index
                         ret.uv = hit.uv
                         ret.hit = 1
-                continue
+            if lhs < n:
+                index = self.leaf[lhs]
+                if index != avoid:
+                    hit = self.element_intersect(index, ray)
+                    if hit.hit != 0 and hit.depth < ret.depth:
+                        ret.depth = hit.depth
+                        ret.index = index
+                        ret.uv = hit.uv
+                        ret.hit = 1
 
-            i = curr - n
-            bbox = Box(self.bmin[i], self.bmax[i])
-            if bbox.intersect(ray).hit == 0:
-                continue
-
-            ntimes += 1
-            stack.push(self.child[i][0])
-            stack.push(self.child[i][1])
+            if rhs < n and lhs < n:
+                next_ptr = self.miss_ptr[i]
+            elif lhs < n:
+                next_ptr = rhs
+            else:
+                next_ptr = lhs
 
         return ret
 
